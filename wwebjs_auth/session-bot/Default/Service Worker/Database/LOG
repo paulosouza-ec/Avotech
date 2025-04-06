@@ -1,3 +1,2 @@
-2025/04/03-09:31:54.192 2048 Reusing MANIFEST C:\Users\psgs2\Desktop\AvoTech\wwebjs_auth\session-bot\Default\Service Worker\Database/MANIFEST-000001
-2025/04/03-09:31:54.193 2048 Recovering log #3
-2025/04/03-09:31:54.194 2048 Reusing old log C:\Users\psgs2\Desktop\AvoTech\wwebjs_auth\session-bot\Default\Service Worker\Database/000003.log 
+2025/04/05-21:58:17.192 3f2c Creating DB C:\Users\psgs2\Desktop\AvoTech\wwebjs_auth\session-bot\Default\Service Worker\Database since it was missing.
+2025/04/05-21:58:17.200 3f2c Reusing MANIFEST C:\Users\psgs2\Desktop\AvoTech\wwebjs_auth\session-bot\Default\Service Worker\Database/MANIFEST-000001
