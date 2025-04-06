@@ -1,3 +1,4 @@
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
@@ -84,17 +85,40 @@ async function buscarFarmaciasOverpass(lat, lon) {
     out;
   `;
   const resp = await axios.post(overpassUrl, `data=${encodeURIComponent(query)}`);
-  return resp.data.elements.map(e => ({
-    nome: e.tags.name || 'Farmácia sem nome',
-    endereco: `${e.tags['addr:street'] || 'Rua desconhecida'}, ${e.tags['addr:housenumber'] || ''}`.trim()
-  }));
+  return resp.data.elements.map(e => {
+    const tags = e.tags || {};
+
+    const partes = [
+      tags['addr:full'],
+      tags['addr:street'],
+      tags['addr:housenumber'],
+      tags['addr:suburb'],
+      tags['addr:city'],
+      tags['addr:postcode']
+    ].filter(Boolean);
+
+    const endereco = partes.length > 0 ? partes.join(', ') : 'Endereço não informado';
+
+    return {
+      nome: tags.name || 'Farmácia sem nome',
+      endereco
+    };
+  });
 }
 
 async function buscarFarmacias(endereco, nomeRemedio) {
   const { lat, lon } = await obterCoordenadasNominatim(endereco);
-  const farmacias = await buscarFarmaciasOverpass(lat, lon);
-  return farmacias.slice(0, 5);
+  const todasFarmacias = await buscarFarmaciasOverpass(lat, lon);
+
+  const farmaciasValidas = todasFarmacias.filter(f => {
+    const nomeValido = f.nome && f.nome.toLowerCase() !== 'farmácia sem nome';
+    const enderecoValido = f.endereco && f.endereco.toLowerCase() !== 'endereço não informado';
+    return nomeValido && enderecoValido;
+  });
+
+  return farmaciasValidas.slice(0, 5);
 }
+
 
 client.on('qr', qr => qrcode.generate(qr, { small: true }));
 
