@@ -371,6 +371,30 @@ async function enviarMensagemFarmacia(numeroFarmacia, nomeFarmacia, nomeRemedio,
   }
 }
 
+// Função para processar respostas por áudio
+async function processarRespostaAudio(msg, estado) {
+  const media = await msg.downloadMedia();
+  const audioPath = path.join(__dirname, `audio_${Date.now()}.ogg`);
+  fs.writeFileSync(audioPath, Buffer.from(media.data, 'base64'));
+
+  try {
+    const transcricao = await transcreverAudio(audioPath);
+    if (!transcricao) {
+      await msg.reply('❌ Não consegui entender o áudio. Tente novamente.');
+      return null;
+    }
+    
+    // Log para depuração
+    console.log(`Transcrição do áudio: ${transcricao}`);
+    
+    return transcricao.toLowerCase().trim();
+  } catch (err) {
+    console.error('Erro ao processar áudio:', err);
+    await msg.reply('⚠️ Ocorreu um erro ao processar seu áudio. Tente novamente ou digite sua resposta.');
+    return null;
+  }
+}
+
 client.on('qr', qr => qrcode.generate(qr, { small: true }));
 
 client.on('ready', () => {
@@ -382,153 +406,259 @@ client.on('message', async msg => {
   if (!userStates[userId]) userStates[userId] = {};
   const estado = userStates[userId];
 
+  // Função auxiliar para responder
+  const responder = async (texto) => {
+    await msg.reply(texto);
+  };
+
   // Resposta inicial
   if (msg.body.toLowerCase().includes('oi') || msg.body.toLowerCase().includes('olá') || msg.body.toLowerCase().includes('ola')) {
-    return msg.reply('👋 Olá! Que bom falar com você 😊. Eu sou um assistente virtual e posso te ajudar a encontrar farmácias próximas com o remédio que você precisa. Me envie um áudio com o nome do remédio ou escreva aqui o que deseja.');
+    return responder('👋 Olá! Que bom falar com você 😊. Eu sou um assistente virtual e posso te ajudar a encontrar farmácias próximas com o remédio que você precisa. Me envie um áudio com o nome do remédio ou escreva aqui o que deseja.');
   }
 
-  // Se estiver esperando endereço
-  if (estado.esperandoEndereco) {
-    estado.endereco = msg.body;
-    estado.esperandoEndereco = false;
-    msg.reply('📍 Obrigado! Agora me envie um áudio dizendo o nome do remédio que você precisa.');
-    return;
-  }
-
-  // Processamento de áudio
+  // Se for um áudio, processamos
   if (msg.hasMedia && msg.type === 'ptt') {
-    const media = await msg.downloadMedia();
-    const audioPath = path.join(__dirname, `audio_${Date.now()}.ogg`);
-    fs.writeFileSync(audioPath, Buffer.from(media.data, 'base64'));
+    const transcricao = await processarRespostaAudio(msg, estado);
+    if (!transcricao) return;
 
-    try {
-      const transcricao = await transcreverAudio(audioPath);
-      if (!transcricao) return msg.reply('❌ Não consegui entender o áudio. Tente novamente.');
-
-      if (!estado.endereco) {
-        estado.ultimoRemedio = transcricao;
-        estado.esperandoEndereco = true;
-        return msg.reply('📍 Antes de buscar farmácias, por favor me diga seu endereço completo (com bairro e cidade).');
-      }
-
-      msg.reply(`🔍 Procurando farmácias próximas com o remédio: *${transcricao}*...`);
-      const farmacias = await buscarFarmacias(estado.endereco, transcricao);
-
-      if (farmacias.length === 0) return msg.reply('🚫 Não encontrei farmácias por perto. Tente outro endereço.');
-
-      let resposta = '🏥 Farmácias próximas:\n';
-      farmacias.forEach((f, i) => {
-        resposta += `\n${i + 1}. *${f.nome}*\n📍 ${f.endereco}`;
-      });
-
-      resposta += `\n\nDeseja que eu entre em contato com alguma dessas farmácias perguntando pelo remédio "${transcricao}"? Me diga o número da farmácia da lista (1 a ${farmacias.length}).`;
-
-      estado.opcoes = farmacias;
-      estado.ultimoRemedio = transcricao;
-      estado.escolhendoFarmacia = true;
-
-      msg.reply(resposta);
-    } catch (err) {
-      console.error('Erro no áudio:', err);
-      msg.reply('⚠️ Ocorreu um erro ao processar o áudio');
+    // Se estiver esperando endereço
+    if (estado.esperandoEndereco) {
+      estado.endereco = transcricao;
+      estado.esperandoEndereco = false;
+      return responder('📍 Obrigado! Agora me envie um áudio dizendo o nome do remédio que você precisa.');
     }
-    return;
-  }
 
-  // Seleção de farmácia
-  if (estado.escolhendoFarmacia) {
-    const escolha = parseInt(msg.body.trim());
-    const { opcoes, ultimoRemedio, endereco } = estado;
+    // Seleção de farmácia por áudio
+    if (estado.escolhendoFarmacia) {
+      const escolha = parseInt(transcricao.match(/\d+/)?.[0]);
+      const { opcoes, ultimoRemedio, endereco } = estado;
 
-    if (!isNaN(escolha) && escolha >= 1 && escolha <= opcoes.length) {
-      const farmaciaEscolhida = opcoes[escolha - 1];
-      
-      // Limpa o estado de escolha antes de prosseguir
-      estado.escolhendoFarmacia = false;
-      
-      let infoFarmacia = await buscarInfoFarmaciaSerpAPI(farmaciaEscolhida.nome, farmaciaEscolhida.endereco);
-      
-      if (!infoFarmacia.telefone) {
-        infoFarmacia = await buscarInfoFarmaciaGoogleMaps(farmaciaEscolhida.nome, farmaciaEscolhida.endereco);
-      }
-
-      let resposta = `✉️ *Informações da Farmácia*\n\n`;
-      resposta += `🏥 *${farmaciaEscolhida.nome}*\n`;
-      resposta += `📍 ${farmaciaEscolhida.endereco}\n`;
-      resposta += `📞 ${infoFarmacia.telefone || 'Telefone não encontrado'}\n`;
-      resposta += `🕒 ${formatarHorario(infoFarmacia.horario)}\n\n`;
-      resposta += `💊 *Remédio solicitado:* ${ultimoRemedio}\n\n`;
-
-      if (infoFarmacia.telefone) {
-        estado.ultimaFarmacia = {
-          nome: farmaciaEscolhida.nome,
-          telefone: infoFarmacia.telefone
-        };
+      if (!isNaN(escolha) && escolha >= 1 && escolha <= opcoes.length) {
+        const farmaciaEscolhida = opcoes[escolha - 1];
         
-        resposta += `Deseja que eu envie uma mensagem para esta farmácia perguntando sobre o remédio *${ultimoRemedio}* e informando seu endereço *${endereco}*?\n\n`;
-        resposta += `Digite *"SIM"* para confirmar ou *"NÃO"* para cancelar.`;
+        // Limpa o estado de escolha antes de prosseguir
+        estado.escolhendoFarmacia = false;
         
-        estado.aguardandoConfirmacao = true;
+        let infoFarmacia = await buscarInfoFarmaciaSerpAPI(farmaciaEscolhida.nome, farmaciaEscolhida.endereco);
+        
+        if (!infoFarmacia.telefone) {
+          infoFarmacia = await buscarInfoFarmaciaGoogleMaps(farmaciaEscolhida.nome, farmaciaEscolhida.endereco);
+        }
+
+        let resposta = `✉️ *Informações da Farmácia*\n\n`;
+        resposta += `🏥 *${farmaciaEscolhida.nome}*\n`;
+        resposta += `📍 ${farmaciaEscolhida.endereco}\n`;
+        resposta += `📞 ${infoFarmacia.telefone || 'Telefone não encontrado'}\n`;
+        resposta += `🕒 ${formatarHorario(infoFarmacia.horario)}\n\n`;
+        resposta += `💊 *Remédio solicitado:* ${ultimoRemedio}\n\n`;
+
+        if (infoFarmacia.telefone) {
+          estado.ultimaFarmacia = {
+            nome: farmaciaEscolhida.nome,
+            telefone: infoFarmacia.telefone
+          };
+          
+          resposta += `Deseja que eu envie uma mensagem para esta farmácia perguntando sobre o remédio *${ultimoRemedio}* e informando seu endereço *${endereco}*?\n\n`;
+          resposta += `Responda por áudio dizendo *"SIM"* para confirmar ou *"NÃO"* para cancelar.`;
+          
+          estado.aguardandoConfirmacao = true;
+        } else {
+          resposta += `*Mensagem sugerida:*\n"Olá! Gostaria de saber se vocês têm o remédio ${ultimoRemedio} e qual o valor. Obrigado!"`;
+        }
+
+        await responder(resposta);
       } else {
-        resposta += `*Mensagem sugerida:*\n"Olá! Gostaria de saber se vocês têm o remédio ${ultimoRemedio} e qual o valor. Obrigado!"`;
+        // Mantém no estado de escolha se a resposta for inválida
+        await responder(`❗ Por favor, envie um áudio dizendo o número entre 1 e ${opcoes.length} correspondente à farmácia desejada.`);
       }
-
-      await msg.reply(resposta);
-    } else {
-      // Mantém no estado de escolha se a resposta for inválida
-      await msg.reply(`❗ Por favor, envie um número entre 1 e ${opcoes.length} correspondente à farmácia desejada.`);
-    }
-    return;
-  }
-
-  // Confirmação de envio para farmácia
-  if (estado.aguardandoConfirmacao) {
-    const respostaUsuario = msg.body.toLowerCase().trim();
-    
-    if (respostaUsuario === 'sim' || respostaUsuario === 's' || respostaUsuario === 'yes') {
-      const { ultimaFarmacia, ultimoRemedio, endereco } = estado;
-      
-      await msg.reply('⏳ Enviando pedido para a farmácia...');
-      
-      const resultado = await enviarMensagemFarmacia(
-        ultimaFarmacia.telefone,
-        ultimaFarmacia.nome,
-        ultimoRemedio,
-        endereco
-      );
-      
-      if (resultado.success) {
-        await msg.reply('✅ Pedido enviado! A farmácia foi contatada com estas informações:\n\n' +
-                      `🏥 *Farmácia:* ${ultimaFarmacia.nome}\n` +
-                      `💊 *Remédio:* ${ultimoRemedio}\n` +
-                      `📍 *Endereço:* ${endereco}\n` +
-                      `💵 *Pagamento:* Dinheiro\n\n` +
-                      `Aguarde a resposta deles. Vou te avisar quando responderem!`);
-        
-        estado.aguardandoResposta = {
-          farmacia: ultimaFarmacia.nome,
-          numero: ultimaFarmacia.telefone,
-          remedio: ultimoRemedio
-        };
-      } else {
-        await msg.reply(`❌ ${resultado.message}\n\nVocê pode tentar entrar em contato manualmente pelo número: ${ultimaFarmacia.telefone}`);
-      }
-    } else if (respostaUsuario === 'não' || respostaUsuario === 'nao' || respostaUsuario === 'n' || respostaUsuario === 'no') {
-      await msg.reply('❌ Pedido cancelado. Você pode entrar em contato manualmente se desejar.');
-    } else {
-      // Mantém no estado de confirmação se a resposta for inválida
-      await msg.reply('❗ Por favor, responda *"SIM"* para confirmar o envio ou *"NÃO"* para cancelar.');
       return;
     }
-    
-    // Limpa os estados independente da resposta
-    estado.aguardandoConfirmacao = false;
-    estado.ultimaFarmacia = null;
+
+    // Confirmação de envio para farmácia por áudio
+    if (estado.aguardandoConfirmacao) {
+      const respostaUsuario = transcricao;
+      
+      if (respostaUsuario.includes('sim') || respostaUsuario.includes('confirm')) {
+        const { ultimaFarmacia, ultimoRemedio, endereco } = estado;
+        
+        await responder('⏳ Enviando pedido para a farmácia...');
+        
+        const resultado = await enviarMensagemFarmacia(
+          ultimaFarmacia.telefone,
+          ultimaFarmacia.nome,
+          ultimoRemedio,
+          endereco
+        );
+        
+        if (resultado.success) {
+          await responder('✅ Pedido enviado! A farmácia foi contatada com estas informações:\n\n' +
+                        `🏥 *Farmácia:* ${ultimaFarmacia.nome}\n` +
+                        `💊 *Remédio:* ${ultimoRemedio}\n` +
+                        `📍 *Endereço:* ${endereco}\n` +
+                        `💵 *Pagamento:* Dinheiro\n\n` +
+                        `Aguarde a resposta deles. Vou te avisar quando responderem!`);
+          
+          estado.aguardandoResposta = {
+            farmacia: ultimaFarmacia.nome,
+            numero: ultimaFarmacia.telefone,
+            remedio: ultimoRemedio
+          };
+        } else {
+          await responder(`❌ ${resultado.message}\n\nVocê pode tentar entrar em contato manualmente pelo número: ${ultimaFarmacia.telefone}`);
+        }
+      } else if (respostaUsuario.includes('não') || respostaUsuario.includes('nao') || respostaUsuario.includes('não') || respostaUsuario.includes('cancel')) {
+        await responder('❌ Pedido cancelado. Você pode entrar em contato manualmente se desejar.');
+      } else {
+        // Mantém no estado de confirmação se a resposta for inválida
+        await responder('❗ Por favor, responda por áudio dizendo *"SIM"* para confirmar o envio ou *"NÃO"* para cancelar.');
+        return;
+      }
+      
+      // Limpa os estados independente da resposta
+      estado.aguardandoConfirmacao = false;
+      estado.ultimaFarmacia = null;
+      return;
+    }
+
+    // Se não estiver em nenhum estado específico, assume que é o nome do remédio
+    if (!estado.endereco) {
+      estado.ultimoRemedio = transcricao;
+      estado.esperandoEndereco = true;
+      return responder('📍 Antes de buscar farmácias, por favor me envie um áudio com seu endereço completo (com bairro e cidade).');
+    }
+
+    // Busca farmácias com o remédio informado
+    await responder(`🔍 Procurando farmácias próximas com o remédio: *${transcricao}*...`);
+    const farmacias = await buscarFarmacias(estado.endereco, transcricao);
+
+    if (farmacias.length === 0) return responder('🚫 Não encontrei farmácias por perto. Tente outro endereço.');
+
+    let resposta = '🏥 Farmácias próximas:\n';
+    farmacias.forEach((f, i) => {
+      resposta += `\n${i + 1}. *${f.nome}*\n📍 ${f.endereco}`;
+    });
+
+    resposta += `\n\nDeseja que eu entre em contato com alguma dessas farmácias perguntando pelo remédio "${transcricao}"? Me envie um áudio dizendo o número da farmácia da lista (1 a ${farmacias.length}).`;
+
+    estado.opcoes = farmacias;
+    estado.ultimoRemedio = transcricao;
+    estado.escolhendoFarmacia = true;
+
+    await responder(resposta);
     return;
+  }
+
+  // Processamento de mensagens de texto (mantido para compatibilidade)
+  if (!msg.hasMedia) {
+    // Se estiver esperando endereço
+    if (estado.esperandoEndereco) {
+      estado.endereco = msg.body;
+      estado.esperandoEndereco = false;
+      return responder('📍 Obrigado! Agora me envie um áudio dizendo o nome do remédio que você precisa.');
+    }
+
+    // Seleção de farmácia
+    if (estado.escolhendoFarmacia) {
+      const escolha = parseInt(msg.body.trim());
+      const { opcoes, ultimoRemedio, endereco } = estado;
+
+      if (!isNaN(escolha) && escolha >= 1 && escolha <= opcoes.length) {
+        const farmaciaEscolhida = opcoes[escolha - 1];
+        
+        // Limpa o estado de escolha antes de prosseguir
+        estado.escolhendoFarmacia = false;
+        
+        let infoFarmacia = await buscarInfoFarmaciaSerpAPI(farmaciaEscolhida.nome, farmaciaEscolhida.endereco);
+        
+        if (!infoFarmacia.telefone) {
+          infoFarmacia = await buscarInfoFarmaciaGoogleMaps(farmaciaEscolhida.nome, farmaciaEscolhida.endereco);
+        }
+
+        let resposta = `✉️ *Informações da Farmácia*\n\n`;
+        resposta += `🏥 *${farmaciaEscolhida.nome}*\n`;
+        resposta += `📍 ${farmaciaEscolhida.endereco}\n`;
+        resposta += `📞 ${infoFarmacia.telefone || 'Telefone não encontrado'}\n`;
+        resposta += `🕒 ${formatarHorario(infoFarmacia.horario)}\n\n`;
+        resposta += `💊 *Remédio solicitado:* ${ultimoRemedio}\n\n`;
+
+        if (infoFarmacia.telefone) {
+          estado.ultimaFarmacia = {
+            nome: farmaciaEscolhida.nome,
+            telefone: infoFarmacia.telefone
+          };
+          
+          resposta += `Deseja que eu envie uma mensagem para esta farmácia perguntando sobre o remédio *${ultimoRemedio}* e informando seu endereço *${endereco}*?\n\n`;
+          resposta += `Digite *"SIM"* para confirmar ou *"NÃO"* para cancelar.`;
+          
+          estado.aguardandoConfirmacao = true;
+        } else {
+          resposta += `*Mensagem sugerida:*\n"Olá! Gostaria de saber se vocês têm o remédio ${ultimoRemedio} e qual o valor. Obrigado!"`;
+        }
+
+        await responder(resposta);
+      } else {
+        // Mantém no estado de escolha se a resposta for inválida
+        await responder(`❗ Por favor, envie um número entre 1 e ${opcoes.length} correspondente à farmácia desejada.`);
+      }
+      return;
+    }
+
+    // Confirmação de envio para farmácia
+    if (estado.aguardandoConfirmacao) {
+      const respostaUsuario = msg.body.toLowerCase().trim();
+      
+      if (respostaUsuario === 'sim' || respostaUsuario === 's' || respostaUsuario === 'yes') {
+        const { ultimaFarmacia, ultimoRemedio, endereco } = estado;
+        
+        await responder('⏳ Enviando pedido para a farmácia...');
+        
+        const resultado = await enviarMensagemFarmacia(
+          ultimaFarmacia.telefone,
+          ultimaFarmacia.nome,
+          ultimoRemedio,
+          endereco
+        );
+        
+        if (resultado.success) {
+          await responder('✅ Pedido enviado! A farmácia foi contatada com estas informações:\n\n' +
+                        `🏥 *Farmácia:* ${ultimaFarmacia.nome}\n` +
+                        `💊 *Remédio:* ${ultimoRemedio}\n` +
+                        `📍 *Endereço:* ${endereco}\n` +
+                        `💵 *Pagamento:* Dinheiro\n\n` +
+                        `Aguarde a resposta deles. Vou te avisar quando responderem!`);
+          
+          estado.aguardandoResposta = {
+            farmacia: ultimaFarmacia.nome,
+            numero: ultimaFarmacia.telefone,
+            remedio: ultimoRemedio
+          };
+        } else {
+          await responder(`❌ ${resultado.message}\n\nVocê pode tentar entrar em contato manualmente pelo número: ${ultimaFarmacia.telefone}`);
+        }
+      } else if (respostaUsuario === 'não' || respostaUsuario === 'nao' || respostaUsuario === 'n' || respostaUsuario === 'no') {
+        await responder('❌ Pedido cancelado. Você pode entrar em contato manualmente se desejar.');
+      } else {
+        // Mantém no estado de confirmação se a resposta for inválida
+        await responder('❗ Por favor, responda *"SIM"* para confirmar o envio ou *"NÃO"* para cancelar.');
+        return;
+      }
+      
+      // Limpa os estados independente da resposta
+      estado.aguardandoConfirmacao = false;
+      estado.ultimaFarmacia = null;
+      return;
+    }
+
+    // Se não estiver em nenhum estado específico, assume que é o nome do remédio
+    if (!estado.endereco) {
+      estado.ultimoRemedio = msg.body;
+      estado.esperandoEndereco = true;
+      return responder('📍 Antes de buscar farmácias, por favor me diga seu endereço completo (com bairro e cidade).');
+    }
   }
 
   // Mensagem genérica se não estiver em nenhum fluxo específico
-  msg.reply('ℹ️ Para começar, me envie um áudio com o nome do remédio que você precisa ou digite "ajuda" para ver as opções.');
+  responder('ℹ️ Para começar, me envie um áudio com o nome do remédio que você precisa ou digite "ajuda" para ver as opções.');
 });
 
 client.on('message_create', async (msg) => {
